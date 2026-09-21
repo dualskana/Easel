@@ -864,3 +864,34 @@ export function saveOpencodeSettings(payload: OpencodeSavePayload): Promise<Open
     body: JSON.stringify(payload),
   });
 }
+
+// ═══ 设置面板 · Codex（runtime=codex；模型写项目 .env，凭据由本机 codex login 管理） ═══
+
+export interface CodexSettings {
+  installed: boolean;
+  version: string;
+  loggedIn: boolean;
+  authMode: string;     // chatgpt / apikey / …
+  model: string;        // 本机 ~/.codex/config.toml 的默认模型（只读）
+  easelModel: string;   // 项目 .env 的 EASEL_CODEX_MODEL（Easel 回合实际使用）
+  candidates: string[]; // 可下拉选择的模型候选项
+  reasoning: string;    // 项目 .env 的 EASEL_CODEX_REASONING_EFFORT（空=跟随 Codex 默认）
+  reasoningLevels: string[]; // 当前模型支持的思考强度档位
+  message: string;
+}
+
+export interface CodexSaveResponse extends CodexSettings { ok: boolean; note?: string }
+
+export interface CodexSavePayload { model?: string; reasoning?: string }
+
+export function fetchCodexSettings(): Promise<CodexSettings> {
+  return request('/api/settings/codex');
+}
+
+export function saveCodexSettings(payload: CodexSavePayload): Promise<CodexSaveResponse> {
+  return request('/api/settings/codex/save', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}

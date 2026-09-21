@@ -28,9 +28,12 @@ def cmd_ping(_args) -> int:
     runtime_id = runtime.descriptor.id
 
     # Step 1: selected runtime service
-    gateway_ok = runtime.health().ok
+    health = runtime.health()
+    gateway_ok = health.ok
+    # 成功的 health 也可以带可读详情（如 Codex 的登录方式），失败详情照旧显示。
+    suffix = f" — {health.detail}" if health.detail else ""
     print(f"  {f'Step 1: {runtime_id} service health':<50s} "
-          f"{GREEN if gateway_ok else RED}{'OK' if gateway_ok else 'FAIL'}{NC}")
+          f"{GREEN if gateway_ok else RED}{'OK' if gateway_ok else 'FAIL'}{NC}{suffix}")
     all_ok &= gateway_ok
 
     # Step 2: Agent call

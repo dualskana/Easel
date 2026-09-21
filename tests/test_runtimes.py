@@ -6,7 +6,7 @@ import sys
 import pytest
 
 import easel.runtimes as runtimes
-from easel.runtimes import common, openclaw, opencode
+from easel.runtimes import codex, codex_config, common, openclaw, opencode
 from easel.runtimes.base import RunRequest
 
 
@@ -36,7 +36,7 @@ def test_registry_defaults_to_openclaw_and_lists_builtins(tmp_path, monkeypatch)
     monkeypatch.delenv("EASEL_AGENT_RUNTIME", raising=False)
     monkeypatch.setattr(runtimes, "env_file_value", lambda _name: None)
     assert runtimes.get_runtime().descriptor.id == "openclaw"
-    assert [item.id for item in runtimes.list_runtimes()] == ["openclaw", "opencode"]
+    assert [item.id for item in runtimes.list_runtimes()] == ["openclaw", "opencode", "codex"]
 
 
 def test_registry_selects_from_environment(monkeypatch):
@@ -46,7 +46,7 @@ def test_registry_selects_from_environment(monkeypatch):
 
 def test_registry_rejects_unknown_runtime(monkeypatch):
     monkeypatch.setenv("EASEL_AGENT_RUNTIME", "unknown")
-    with pytest.raises(ValueError, match="openclaw, opencode"):
+    with pytest.raises(ValueError, match="openclaw, opencode, codex"):
         runtimes.get_runtime()
 
 
@@ -68,6 +68,7 @@ def test_status_descriptor_is_json_ready():
 @pytest.mark.parametrize("runtime_id,module_name,executable", [
     ("openclaw", "openclaw", "openclaw"),
     ("opencode", "opencode", "opencode"),
+    ("codex", "codex", "codex"),
 ])
 def test_setup_reuses_installed_runtime(runtime_id, module_name, executable, tmp_path, monkeypatch):
     module = __import__(f"easel.runtimes.{module_name}", fromlist=[module_name])
@@ -324,3 +325,227 @@ def test_openclaw_cli_cancel_terminates_process(tmp_path, monkeypatch):
     assert proc.terminated is True
     assert handle.poll() == -15
     handle.close()
+
+
+# ---- Codex 适配器：JSONL 事件 / 会话续接 / 模型 / 诊断 ----
+
+
+def test_codex_node_requirement_floor():
+    assert codex.CodexAdapter().node_requirement() == (False, "16")
+
+
+def test_codex_event_parser_maps_jsonl():
+    assert codex.parse_event(json.dumps({"type": "thread.started", "thread_id": "t1"})) is None
+    text = codex.parse_event(json.dumps({
+        "type": "item.completed", "item": {"id": "item_0", "type": "agent_message", "text": "你好"},
+    }))
+    assert text is not None and text.type == "text" and text.text == "你好"
+    thinking = codex.parse_event(json.dumps({
+        "type": "item.completed", "item": {"type": "reasoning", "text": "先想一下"},
+    }))
+    assert thinking is not None and thinking.type == "thinking"
+    activity = codex.parse_event(json.dumps({
+        "type": "item.started",
+        "item": {"type": "command_execution", "command": "printf hello > ok.txt", "status": "in_progress"},
+    }))
+    assert activity is not None and activity.type == "activity"
+    assert codex.parse_event("not json") is None
+
+
+def test_codex_error_event_raises():
+    with pytest.raises(RuntimeError, match="模型不可用"):
+        codex.parse_event(json.dumps({"type": "error", "error": {"message": "模型不可用"}}))
+
+
+@pytest.mark.parametrize("lines,detail", [
+    ([json.dumps({"type": "thread.started", "thread_id": "t1"}),
+      json.dumps({"type": "turn.completed", "usage": {"output_tokens": 3}})], "没有返回正文"),
+    ([json.dumps({"type": "turn.failed", "error": {"message": "quota exhausted"}})], "quota"),
+])
+def test_codex_zero_exit_does_not_hide_failure(lines, detail):
+    from types import SimpleNamespace
+    proc = SimpleNamespace(stdout=iter([line + "\n" for line in lines]), wait=lambda: 0)
+    handle = codex.CodexRunHandle(proc, None)
+    assert list(handle.events()) == []
+    result = handle.wait()
+    assert result.returncode != 0
+    assert not result.clean_end
+    assert detail in result.diagnostics["error"]
+
+
+def test_codex_handle_persists_thread_id_and_streams_text(tmp_path):
+    from types import SimpleNamespace
+    session_file = tmp_path / "sessions" / "codex-abc.txt"
+    lines = [
+        {"type": "thread.started", "thread_id": "01a0-thread"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "第一段"}},
+        {"type": "item.started", "item": {"type": "command_execution", "command": "ls"}},
+        {"type": "item.completed", "item": {"type": "agent_message", "text": "第二段"}},
+        {"type": "turn.completed", "usage": {"output_tokens": 7}},
+    ]
+    proc = SimpleNamespace(stdout=iter([json.dumps(line, ensure_ascii=False) + "\n" for line in lines]),
+                           wait=lambda: 0)
+    handle = codex.CodexRunHandle(proc, session_file)
+    events = list(handle.events())
+    result = handle.wait()
+
+    assert [e.type for e in events] == ["text", "activity", "text"]
+    assert result.text == "第一段第二段"
+    assert result.clean_end is True
+    assert result.diagnostics["session_id"] == "01a0-thread"
+    assert result.diagnostics["usage"] == {"output_tokens": 7}
+    assert session_file.read_text(encoding="utf-8") == "01a0-thread"
+
+
+def test_codex_start_resumes_thread_and_passes_model(tmp_path, monkeypatch):
+    seen = {}
+
+    def popen(cmd, **kwargs):
+        seen["cmd"], seen["kwargs"] = cmd, kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(codex.subprocess, "Popen", popen)
+    monkeypatch.setattr(codex, "base_cmd", lambda: ["/bin/codex"])
+    monkeypatch.setattr(codex_config, "model", lambda: "gpt-6-astra")
+    monkeypatch.setattr(codex_config, "reasoning", lambda: "high")
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    codex.session_path("sk", sessions).write_text("thread-9", encoding="utf-8")
+
+    handle = codex.CodexAdapter().start(RunRequest("hi", "sk", 5, tmp_path, {}, sessions))
+    cmd = seen["cmd"]
+
+    assert cmd[:3] == ["/bin/codex", "exec", "resume"]
+    assert cmd[3] == "thread-9"
+    assert cmd[-1] == "hi"
+    assert cmd[cmd.index("-m") + 1] == "gpt-6-astra"
+    assert 'model_reasoning_effort="high"' in cmd
+    assert seen["kwargs"]["stdin"] == codex.subprocess.DEVNULL
+    handle.close()
+
+
+def test_codex_start_fresh_session_uses_cwd_sandbox(tmp_path, monkeypatch):
+    seen = {}
+
+    def popen(cmd, **kwargs):
+        seen["cmd"], seen["kwargs"] = cmd, kwargs
+        return FakeProc()
+
+    monkeypatch.setattr(codex.subprocess, "Popen", popen)
+    monkeypatch.setattr(codex, "base_cmd", lambda: ["/bin/codex"])
+    monkeypatch.setattr(codex_config, "model", lambda: "")
+    monkeypatch.setattr(codex_config, "reasoning", lambda: "")
+
+    handle = codex.CodexAdapter().start(RunRequest("hi", "sk", 5, tmp_path, {}, tmp_path / "sessions"))
+    cmd = seen["cmd"]
+
+    assert cmd[:2] == ["/bin/codex", "exec"]
+    assert "resume" not in cmd
+    assert cmd[cmd.index("-C") + 1] == str(tmp_path)
+    assert cmd[cmd.index("-s") + 1] == "workspace-write"
+    assert "-m" not in cmd
+    assert 'model_reasoning_effort="' not in " ".join(cmd)
+    handle.close()
+
+
+def test_codex_delete_session_calls_cli_and_clears_mapping(tmp_path, monkeypatch):
+    seen = {}
+
+    class Completed:
+        returncode = 0
+
+    def run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return Completed()
+
+    monkeypatch.setattr(codex.subprocess, "run", run)
+    monkeypatch.setattr(codex, "base_cmd", lambda: ["/bin/codex"])
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    path = codex.session_path("sk", sessions)
+    path.write_text("thread-9", encoding="utf-8")
+
+    result = codex.CodexAdapter().delete_session("sk", sessions)
+
+    assert seen["cmd"] == ["/bin/codex", "delete", "thread-9"]
+    assert result.ok and result.data["deleted"] is True
+    assert not path.exists()
+
+
+def test_codex_health_requires_login(monkeypatch):
+    adapter = codex.CodexAdapter()
+    monkeypatch.setattr(codex.shutil, "which", lambda _name: "/bin/codex")
+    monkeypatch.setattr(codex_config, "login_status",
+                        lambda: (False, "未登录；请在终端运行 codex login"))
+    health = adapter.health()
+    assert not health.ok and "codex login" in health.detail
+    monkeypatch.setattr(codex_config, "login_status", lambda: (True, "Logged in using ChatGPT"))
+    health = adapter.health()
+    assert health.ok and "ChatGPT" in health.detail
+
+
+def test_codex_version_parses_cli_output(monkeypatch):
+    class Completed:
+        returncode = 0
+        stdout = "codex-cli 0.155.1\n"
+
+    monkeypatch.setattr(codex.subprocess, "run", lambda cmd, **kwargs: Completed())
+    monkeypatch.setattr(codex, "base_cmd", lambda: ["/bin/codex"])
+    assert codex.codex_version() == "0.155.1"
+
+
+def test_codex_diagnose_reads_doctor_report(monkeypatch):
+    report = {"codexVersion": "0.155.1", "checks": {
+        "auth.credentials": {"status": "ok", "details": {"stored auth mode": "chatgpt"}},
+        "config.load": {"status": "ok", "details": {"model": "gpt-6-astra"}},
+    }}
+    monkeypatch.setattr(codex.shutil, "which", lambda _name: "/bin/codex")
+    monkeypatch.setattr(codex, "codex_version", lambda: "0.155.1")
+    monkeypatch.setattr(codex_config, "doctor_report", lambda: report)
+    monkeypatch.setattr(codex_config, "model", lambda: "")
+    labels = {item.label: item.ok for item in codex.CodexAdapter().diagnose()}
+    assert labels["Codex command (0.155.1)"]
+    assert labels["Codex login (chatgpt)"]
+    assert labels["Codex model (gpt-6-astra)"]
+    assert "Skills synced" in labels
+
+
+def test_codex_diagnose_falls_back_to_login_status(monkeypatch):
+    """doctor 不可用时不把已登录误报成未登录，并显示 Easel 选中的模型。"""
+    monkeypatch.setattr(codex.shutil, "which", lambda _name: "/bin/codex")
+    monkeypatch.setattr(codex, "codex_version", lambda: "0.155.1")
+    monkeypatch.setattr(codex_config, "doctor_report", lambda: {})
+    monkeypatch.setattr(codex_config, "login_status", lambda: (True, "Logged in using ChatGPT"))
+    monkeypatch.setattr(codex_config, "model", lambda: "gpt-6-mini")
+    labels = {item.label: item.ok for item in codex.CodexAdapter().diagnose()}
+    assert labels["Codex login (Logged in using ChatGPT)"] is True
+    assert labels["Codex model (gpt-6-mini)"] is True
+
+
+def test_codex_delete_session_reports_cli_failure(tmp_path, monkeypatch):
+    class Failed:
+        returncode = 1
+
+    monkeypatch.setattr(codex.subprocess, "run", lambda cmd, **kwargs: Failed())
+    monkeypatch.setattr(codex, "base_cmd", lambda: ["/bin/codex"])
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    path = codex.session_path("sk", sessions)
+    path.write_text("thread-9", encoding="utf-8")
+
+    result = codex.CodexAdapter().delete_session("sk", sessions)
+
+    assert result.ok is False and "退出码" in result.reason
+    assert not path.exists()
+
+
+def test_codex_optional_operations_are_unsupported():
+    adapter = runtimes.get_runtime("codex")
+    service = adapter.manage_service("start")
+    assert service.ok is False and service.code == 2
+    assert adapter.question_status([]).ok is False
+    assert adapter.answer_question(runtimes.QuestionAnswer("q", {})).ok is False
+    assert adapter.config_snapshot() == {"primary": "", "providers": {}}
+    assert adapter.provider_creds() == {}
+    assert adapter.is_local_gateway_base("http://127.0.0.1") is False

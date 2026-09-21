@@ -39,7 +39,7 @@ if str(PROJECT_ROOT / "scripts") not in sys.path:
 
 from easel.runtimes import QuestionAnswer, RunRequest, get_runtime, runtime_env
 from easel.runtimes import openclaw as openclaw_runtime
-from easel.runtimes import opencode_config
+from easel.runtimes import codex_config, opencode_config
 from easel.runtimes.openclaw_config import RESERVED_PROVIDER_KEYS
 from easel.persona import load_profile_text, persona_prefix, chat_turn_message, profile_exists, _FILE_ORDER
 from easel.timeouts import TIMEOUT_CHAT, TIMEOUT_DIRECT, TIMEOUT_PRODUCE
@@ -1500,6 +1500,54 @@ async def api_settings_opencode_save(req: OpencodeSaveRequest):
         raise HTTPException(503, f"OpenCode server 操作失败：{type(exc).__name__}: {exc}"[:200]) from exc
     resp = {"ok": True, "note": "OpenCode 已保存（下一条消息生效）"}
     resp.update(await asyncio.to_thread(opencode_config.snapshot))
+    return resp
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# 设置面板 · Codex（runtime=codex；只读状态 + 默认模型，凭据由 codex login 管理）
+# ═══════════════════════════════════════════════════════════════════════
+
+
+@app.get("/api/settings/codex")
+async def api_settings_codex():
+    """Codex 状态快照；未安装或 doctor 不可用时降级为可读状态，不报 5xx。"""
+    return await asyncio.to_thread(codex_config.snapshot)
+
+
+class CodexSaveRequest(BaseModel):
+    model: str = ""
+    reasoning: str | None = None
+
+
+@app.post("/api/settings/codex/save")
+async def api_settings_codex_save(req: CodexSaveRequest):
+    """保存 Easel 侧选用的 Codex 模型/思考强度：写项目 .env，下一条消息生效。"""
+    runtime = get_runtime()
+    if runtime.descriptor.id != "codex":
+        raise HTTPException(400, f"当前 runtime（{runtime.descriptor.label}）不支持 Codex 配置管理")
+    model = req.model.strip()
+    if not model and req.reasoning is None:
+        raise HTTPException(400, "没有可保存的改动")
+
+    def _apply() -> None:
+        # 先全部校验再落盘：非法项不允许留下半写状态。思考强度按目标模型（新模型或
+        # 当前生效模型）的档位校验，避免存下该模型不支持的强度。
+        target_model = model or codex_config.model()
+        if model:
+            codex_config.validate_model(model)
+        if req.reasoning is not None:
+            codex_config.validate_reasoning(req.reasoning, target_model)
+        if model:
+            codex_config.set_easel_model(model)
+        if req.reasoning is not None:
+            codex_config.set_easel_reasoning(req.reasoning)
+
+    try:
+        await asyncio.to_thread(_apply)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    resp = {"ok": True, "note": "Codex 配置已保存（下一条消息生效）"}
+    resp.update(await asyncio.to_thread(codex_config.snapshot))
     return resp
 
 

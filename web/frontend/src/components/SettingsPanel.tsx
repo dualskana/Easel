@@ -6,8 +6,9 @@ import {
   fetchEnvTools, startEnvInstall, fetchEnvJob,
   fetchModelChannels, runChannelSelftest, saveModelConfig,
   fetchStatus, fetchOpencodeSettings, saveOpencodeSettings,
+  fetchCodexSettings, saveCodexSettings,
 } from '../lib/api';
-import type { EnvTool, ModelRow, SelftestResult, OpencodeModel, OpencodeSettings } from '../lib/api';
+import type { EnvTool, ModelRow, SelftestResult, OpencodeModel, OpencodeSettings, CodexSettings } from '../lib/api';
 import { IconSlidersHorizontal, IconPackage, IconEllipsis } from './settingsIcons';
 
 interface Props { onClose: () => void; }
@@ -208,6 +209,31 @@ export default function SettingsPanel({ onClose }: Props) {
 
   useEffect(() => { if (runtimeId === 'opencode') void loadOc(); }, [runtimeId, loadOc]);
 
+  // ── Codex（runtime=codex：状态只读 + Easel 侧默认模型/思考强度） ──
+  const [codex, setCodex] = useState<CodexSettings | null>(null);
+  const [codexModel, setCodexModel] = useState('');
+  const [codexReasoning, setCodexReasoning] = useState('');
+  const [codexLoading, setCodexLoading] = useState(false);
+
+  const applyCodex = useCallback((d: CodexSettings) => {
+    setCodex(d);
+    setCodexModel(d.easelModel || '');
+    setCodexReasoning(d.reasoning || '');
+  }, []);
+
+  const loadCodex = useCallback(async () => {
+    setCodexLoading(true);
+    try {
+      applyCodex(await fetchWithRetry(() => fetchCodexSettings(), 4, 15000));
+    } catch (e) {
+      setModelErr(e instanceof Error ? `Codex 状态读取失败：${e.message}` : 'Codex 状态读取失败');
+    } finally {
+      setCodexLoading(false);
+    }
+  }, [applyCodex]);
+
+  useEffect(() => { if (runtimeId === 'codex') void loadCodex(); }, [runtimeId, loadCodex]);
+
   const doSelftest = useCallback(async (channel: string) => {
     setTesting(true);
     setSelftestNote('');
@@ -230,6 +256,29 @@ export default function SettingsPanel({ onClose }: Props) {
   const [savedNote, setSavedNote] = useState('');
 
   const saveCurrent = useCallback(async () => {
+    if (runtimeId === 'codex' && chan === 'chat') {
+      const model = codexModel.trim();
+      const reasoning = codexReasoning.trim();
+      const modelChanged = Boolean(model) && model !== (codex?.easelModel || '');
+      const reasoningChanged = Boolean(reasoning) && reasoning !== (codex?.reasoning || '');
+      if (!modelChanged && !reasoningChanged) { setSavedNote('没有可保存的改动（模型/强度未变）'); return; }
+      setSaving(true);
+      setSavedNote('');
+      try {
+        const payload: { model?: string; reasoning?: string } = {};
+        if (modelChanged) payload.model = model;
+        if (reasoningChanged) payload.reasoning = reasoning;
+        const d = await fetchWithRetry(() => saveCodexSettings(payload), 3, 20000);
+        applyCodex(d);
+        setSavedNote(d.note ? `✓ ${d.note}` : '✓ 已保存');
+      } catch (e) {
+        setSavedNote(e instanceof Error ? `保存失败：${e.message}` : '保存失败');
+      } finally {
+        setSaving(false);
+        setTimeout(() => setSavedNote(''), 6000);
+      }
+      return;
+    }
     if (runtimeId === 'opencode' && chan === 'chat') {
       if (!oc?.serverReady) { setSavedNote('OpenCode server 未就绪，无法保存'); return; }
       const keys: Record<string, string> = {};
@@ -291,7 +340,8 @@ export default function SettingsPanel({ onClose }: Props) {
       setSaving(false);
       setTimeout(() => setSavedNote(''), 6000);
     }
-  }, [chan, chatRows, transRows, mediaRows, refreshEnv, runtimeId, oc, ocKeys, ocPrimary, applyOc]);
+  }, [chan, chatRows, transRows, mediaRows, refreshEnv, runtimeId, oc, ocKeys, ocPrimary, applyOc,
+      codex, codexModel, codexReasoning, applyCodex]);
 
   const removeOcKey = useCallback(async (pid: string) => {
     if (!window.confirm(`清除「${pid}」在 OpenCode 里保存的凭证？`)) return;
@@ -565,6 +615,7 @@ export default function SettingsPanel({ onClose }: Props) {
   );
 
   const chatOk = chatRows.length > 0 && !chatRows[0].result.includes('缺');
+  const codexOk = Boolean(codex?.installed && codex?.loggedIn);
   const transOk = transRows.length > 1 && transRows[1].result.includes('已配置');
 
   return (
@@ -654,7 +705,63 @@ export default function SettingsPanel({ onClose }: Props) {
                   </section>
                 )}
 
-                {chan === 'chat' && runtimeId !== 'opencode' && (
+                {chan === 'chat' && runtimeId === 'codex' && (
+                  <section className="st-panel active">
+                    <div className="panel-top">
+                      <span className={`pill ${codexOk ? 'ok' : codex?.installed ? 'warn' : 'off'}`}><span className="dot" />{codexOk ? 'Codex 已就绪' : codex?.installed ? 'Codex 未登录' : 'Codex 未安装'}</span>
+                      <span className="desc">登录与凭据由本机 codex login 管理；默认模型写入项目 .env，下一条消息生效</span>
+                      <span className="spacer" />
+                      <label className="desc" htmlFor="codex-model">默认模型</label>
+                      <select
+                        id="codex-model"
+                        className="mock"
+                        value={codexModel}
+                        disabled={codexLoading || !codex?.installed}
+                        onChange={(e) => setCodexModel(e.target.value)}
+                      >
+                        <option value="">（不改）</option>
+                        {Array.from(new Set([...(codex?.candidates || []), ...(codexModel ? [codexModel] : [])])).map((m) => (
+                          <option key={m} value={m}>{m}</option>
+                        ))}
+                      </select>
+                      <button className="btn btn-sm" onClick={() => void loadCodex()} disabled={codexLoading}>
+                        {codexLoading ? '读取中…' : '刷新'}
+                      </button>
+                    </div>
+                    <div className="panel-top">
+                      <label className="desc" htmlFor="codex-reasoning">思考强度</label>
+                      <select
+                        id="codex-reasoning"
+                        className="mock"
+                        value={codexReasoning}
+                        disabled={codexLoading || !codex?.installed}
+                        onChange={(e) => setCodexReasoning(e.target.value)}
+                      >
+                        <option value="">（不改）</option>
+                        {Array.from(new Set([...(codex?.reasoningLevels || []), ...(codexReasoning ? [codexReasoning] : [])])).map((lv) => (
+                          <option key={lv} value={lv}>{lv}</option>
+                        ))}
+                      </select>
+                      <span className="spacer" />
+                      <span className="desc">{codex?.reasoning ? `当前：${codex.reasoning}` : '当前跟随 Codex 默认'}</span>
+                    </div>
+                    {codexLoading && !codex ? (
+                      <div className="board"><div className="empty"><span className="spin" /> 正在读取 Codex 状态…</div></div>
+                    ) : (
+                      <div className="board">
+                        <div className="stub-row"><span className="tag2">CLI</span>{codex?.installed ? (codex.version || '已安装') : '未安装'}<span className="future">{codex?.installed ? 'codex doctor 读取' : 'npm install -g @openai/codex'}</span></div>
+                        <div className="stub-row"><span className="tag2">登录</span>{codex?.loggedIn ? `已登录（${codex.authMode || 'codex login'}）` : '未登录'}<span className="future">{codex?.loggedIn ? '复用本机凭据' : '终端运行 codex login'}</span></div>
+                        <div className="stub-row"><span className="tag2">本机模型</span>{codex?.model || '—'}<span className="future">~/.codex/config.toml（只读）</span></div>
+                        <div className="stub-row"><span className="tag2">Easel 模型</span>{codex?.easelModel || '未设置（用本机默认）'}<span className="future">EASEL_CODEX_MODEL · 项目 .env</span></div>
+                        <div className="stub-row"><span className="tag2">思考强度</span>{codex?.reasoning || '跟随 Codex 默认'}<span className="future">EASEL_CODEX_REASONING_EFFORT · 项目 .env</span></div>
+                      </div>
+                    )}
+                    {codex?.message ? <div className="foot-note">{codex.message}</div> : null}
+                    <div className="foot-note">Easel 选中的模型与思考强度只作用于本工作台的 Codex 回合（每轮显式传 -m / -c model_reasoning_effort），不改动你的全局 Codex 配置。</div>
+                  </section>
+                )}
+
+                {chan === 'chat' && runtimeId !== 'opencode' && runtimeId !== 'codex' && (
                   <section className="st-panel active">
                     <div className="panel-top">
                       <span className={`pill ${chatOk ? 'ok' : 'off'}`}><span className="dot" />{chatOk ? '主通道在线' : '未配置'}</span>

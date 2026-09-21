@@ -82,10 +82,10 @@ print(json.dumps(p))
 Write-Host "`nEasel · Windows 安装向导" -ForegroundColor Magenta
 $AgentRuntime = $env:EASEL_AGENT_RUNTIME
 if ([string]::IsNullOrWhiteSpace($AgentRuntime)) {
-    $runtimeChoice = Read-Host 'Agent runtime：1 OpenClaw（默认）/ 2 OpenCode [1]'
-    $AgentRuntime = if ($runtimeChoice -eq '2') { 'opencode' } else { 'openclaw' }
+    $runtimeChoice = Read-Host 'Agent runtime：1 OpenClaw（默认）/ 2 OpenCode / 3 Codex [1]'
+    $AgentRuntime = if ($runtimeChoice -eq '2') { 'opencode' } elseif ($runtimeChoice -eq '3') { 'codex' } else { 'openclaw' }
 }
-if ($AgentRuntime -notin @('openclaw', 'opencode')) { Fail 'EASEL_AGENT_RUNTIME 仅支持 openclaw 或 opencode' }
+if ($AgentRuntime -notin @('openclaw', 'opencode', 'codex')) { Fail 'EASEL_AGENT_RUNTIME 仅支持 openclaw、opencode 或 codex' }
 Info "Agent runtime：$AgentRuntime"
 Info '检查系统环境...'
 Ensure-Command 'git' 'Git.Git' '请安装 Git for Windows 并加入 PATH。'
@@ -95,9 +95,10 @@ if (-not (Get-Command python -ErrorAction SilentlyContinue) -and -not (Get-Comma
 Ensure-Command 'ffmpeg' 'Gyan.FFmpeg' '请安装 FFmpeg 并加入 PATH。'
 # 跟随 openclaw@latest 的引擎要求（当前 2026.9.x 需要 Node >=24.16.0 <25 || >=26.1.0，25.x/26.0 被排除）。
 $nodeParts = (& node -p 'process.versions.node').Split('.') | ForEach-Object { [int]$_ }
-$nodeOk = if ($AgentRuntime -eq 'opencode') { ($nodeParts[0] -gt 20) -or ($nodeParts[0] -eq 20 -and $nodeParts[1] -ge 10) } else { ($nodeParts[0] -eq 24 -and $nodeParts[1] -ge 16) -or ($nodeParts[0] -eq 26 -and $nodeParts[1] -ge 1) -or ($nodeParts[0] -ge 27) }
+$nodeOk = if ($AgentRuntime -eq 'opencode') { ($nodeParts[0] -gt 20) -or ($nodeParts[0] -eq 20 -and $nodeParts[1] -ge 10) } elseif ($AgentRuntime -eq 'codex') { $nodeParts[0] -ge 16 } else { ($nodeParts[0] -eq 24 -and $nodeParts[1] -ge 16) -or ($nodeParts[0] -eq 26 -and $nodeParts[1] -ge 1) -or ($nodeParts[0] -ge 27) }
 if (-not $nodeOk) {
     if ($AgentRuntime -eq 'opencode') { Fail 'OpenCode 需要 Node.js 20.10+。' }
+    if ($AgentRuntime -eq 'codex') { Fail 'Codex（npm 安装）需要 Node.js 16+；或改用官方独立安装包。' }
     Fail 'Node.js 24.16+（24.x）或 26.1+ 是必需依赖（openclaw@latest 要求）；winget 的 LTS 若仍是 22.x，请手动安装 Node 24。'
 }
 $pythonCommand = (Get-Command python -ErrorAction SilentlyContinue).Source
@@ -204,6 +205,8 @@ if (Test-Path $outputs) {
     $outputsItem = Get-Item $outputs -Force
     if ($outputsItem.LinkType -ne 'Junction') { Fail "$outputs 已存在但不是项目 outputs Junction，请移走后重试。" }
 } else { New-Item -ItemType Junction -Path $outputs -Target (Join-Path $Root 'outputs') | Out-Null }
+} elseif ($AgentRuntime -eq 'codex') {
+    Info 'Codex 使用本机 ~/.codex 配置与现有 skills/openclaw/（登录：codex login）'
 } else {
     Info 'OpenCode 使用项目 opencode.json 与现有 skills/openclaw/'
 }
@@ -340,13 +343,22 @@ if ($anthropicSynced) {
 }
 & openclaw --profile easel config validate
 if ($LASTEXITCODE -ne 0) { Fail 'OpenClaw 配置校验失败。' }
+} elseif ($AgentRuntime -eq 'codex') {
+    if (Get-Command codex -ErrorAction SilentlyContinue) {
+        & codex login status | Out-Null
+        if ($LASTEXITCODE -ne 0) { Write-Warning 'Codex 尚未登录；请运行 codex login' }
+    }
 } else {
     & opencode models *> $null
     if ($LASTEXITCODE -ne 0) { Write-Warning 'OpenCode 尚未配置模型；请运行 opencode 后使用 /connect' }
 }
 $env:EASEL_AGENT_RUNTIME = $AgentRuntime
-& $Python -m easel gateway start
-if ($LASTEXITCODE -ne 0) { Fail 'Easel Gateway 启动失败。' }
+if ($AgentRuntime -ne 'codex') {
+    & $Python -m easel gateway start
+    if ($LASTEXITCODE -ne 0) { Fail 'Easel Gateway 启动失败。' }
+} else {
+    Info 'Codex runtime 无常驻服务，跳过 gateway 启动'
+}
 Ok 'Easel Windows 安装完成'
 Write-Host "启动 Web：$Venv\Scripts\easel.exe web" -ForegroundColor Cyan
 Write-Host "检查环境：$Venv\Scripts\easel.exe doctor" -ForegroundColor Cyan

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 
 from .base import *  # noqa: F401,F403 - public seam
+from .codex import CodexAdapter
 from .common import ENV_FILE, env_file_value, runtime_env
 from .openclaw import OpenClawAdapter
 from .opencode import OpenCodeAdapter
@@ -12,6 +13,7 @@ from .opencode import OpenCodeAdapter
 _REGISTRY = {
     "openclaw": OpenClawAdapter(),
     "opencode": OpenCodeAdapter(),
+    "codex": CodexAdapter(),
 }
 
 

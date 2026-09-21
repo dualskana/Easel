@@ -157,12 +157,13 @@ For faster browsing, each cover opens a lightweight preview of up to one minute.
 
 ## 🚀 Quick Start
 
-Easel supports both **OpenClaw** and **OpenCode** as Agent runtimes. The installer asks which one to use; existing installs and projects without `EASEL_AGENT_RUNTIME` continue to default to OpenClaw. The choice is stored in the project `.env` and shared by the CLI, Web app, gateway, ping, and doctor commands.
+Easel supports **OpenClaw**, **OpenCode**, and **Codex** as Agent runtimes. The installer asks which one to use; existing installs and projects without `EASEL_AGENT_RUNTIME` continue to default to OpenClaw. The choice is stored in the project `.env` and shared by the CLI, Web app, gateway, ping, and doctor commands.
 
 - OpenClaw keeps the existing isolated `easel` profile behavior.
 - OpenCode uses the project `opencode.json` to discover `skills/openclaw/`, while `easel gateway` manages its local headless server. Providers and the default model can be managed in the Web settings panel (Conversation & Scripts): API keys are stored in OpenCode's native auth, and the default model is written to the project `opencode.json`. You can also run `opencode` and configure a model with `/connect`.
+- Codex reuses your local Codex CLI login and configuration (run `codex login` in a terminal; Easel never manages your credentials). The Web settings panel (Conversation & Scripts) shows Codex status and lets you pick the model (`EASEL_CODEX_MODEL`) and reasoning effort (`EASEL_CODEX_REASONING_EFFORT`) Easel uses; both are stored in the project `.env`, affect Easel-initiated turns only, and never modify `~/.codex/config.toml`. Codex has no long-running service, so `easel gateway` does not apply.
 
-Requirements: Linux, macOS, or Windows 10/11, Python 3.10+, and Git. The installer checks the runtime-specific Node.js floor (24.16+ or 26.1+ for OpenClaw; 20.10+ for OpenCode), FFmpeg, and Playwright/Chromium.
+Requirements: Linux, macOS, or Windows 10/11, Python 3.10+, and Git. The installer checks the runtime-specific Node.js floor (24.16+ or 26.1+ for OpenClaw; 20.10+ for OpenCode; 16+ for the npm install of Codex), FFmpeg, and Playwright/Chromium.
 
 ```bash
 git clone git@github.com:ZJU-REAL/Easel.git

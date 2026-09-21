@@ -70,15 +70,19 @@ run_with_progress() {
 clear 2>/dev/null || true
 echo -e "\n${CYAN}╭────────────────────────────────────────────────────╮${NC}"
 echo -e "${CYAN}│${NC}  ${MAGENTA}Easel${NC} · 社媒内容工作台安装向导                 ${CYAN}│${NC}"
-echo -e "${CYAN}│${NC}  ${DIM}OpenClaw / OpenCode · Linux / macOS${NC}             ${CYAN}│${NC}"
+echo -e "${CYAN}│${NC}  ${DIM}OpenClaw / OpenCode / Codex · Linux / macOS${NC}      ${CYAN}│${NC}"
 echo -e "${CYAN}╰────────────────────────────────────────────────────╯${NC}"
 AGENT_RUNTIME="${EASEL_AGENT_RUNTIME:-}"
 if [ -z "$AGENT_RUNTIME" ] && [ -t 0 ]; then
-    RUNTIME_CHOICE="$(ask 'Agent runtime：1 OpenClaw（默认）/ 2 OpenCode [1]')"
-    [ "$RUNTIME_CHOICE" = "2" ] && AGENT_RUNTIME="opencode" || AGENT_RUNTIME="openclaw"
+    RUNTIME_CHOICE="$(ask 'Agent runtime：1 OpenClaw（默认）/ 2 OpenCode / 3 Codex [1]')"
+    case "$RUNTIME_CHOICE" in
+        2) AGENT_RUNTIME="opencode" ;;
+        3) AGENT_RUNTIME="codex" ;;
+        *) AGENT_RUNTIME="openclaw" ;;
+    esac
 fi
 AGENT_RUNTIME="${AGENT_RUNTIME:-openclaw}"
-case "$AGENT_RUNTIME" in openclaw|opencode) ;; *) echo "EASEL_AGENT_RUNTIME 仅支持 openclaw 或 opencode" >&2; exit 1 ;; esac
+case "$AGENT_RUNTIME" in openclaw|opencode|codex) ;; *) echo "EASEL_AGENT_RUNTIME 仅支持 openclaw、opencode 或 codex" >&2; exit 1 ;; esac
 echo -e "\n${DIM}  Agent runtime：${AGENT_RUNTIME}${NC}\n"
 
 # ---- 1. Node.js >= 24.16 ----
@@ -89,6 +93,11 @@ info "检查 Node.js..."
 node_version_ok() {  # $1=major $2=minor
     if [ "$AGENT_RUNTIME" = "opencode" ]; then
         [ "$1" -gt 20 ] || { [ "$1" -eq 20 ] && [ "$2" -ge 10 ]; }
+        return
+    fi
+    if [ "$AGENT_RUNTIME" = "codex" ]; then
+        # npm 包 @openai/codex 的 engines：node >=16（brew 装的单文件版不需要 Node）
+        [ "$1" -ge 16 ]
         return
     fi
     { [ "$1" -eq 24 ] && [ "$2" -ge 16 ]; } \
@@ -109,7 +118,7 @@ if $NODE_OK; then
     ok "Node.js $NODE_VER"
 else
     if [ -n "${NODE_VER:-}" ]; then
-        info "Node.js $NODE_VER 过旧（openclaw@latest 需要 24.16+），安装 Node.js 24..."
+        info "Node.js $NODE_VER 过旧（$AGENT_RUNTIME 要求更高），安装 Node.js 24..."
     else
         info "安装 Node.js 24..."
     fi
@@ -224,6 +233,8 @@ OC="$OPENCLAW_BIN --profile $PROFILE"
 step "4/8" "初始化 Agent workspace" "独立配置与项目技能"
 if [ "$AGENT_RUNTIME" = "opencode" ]; then
     ok "OpenCode 使用项目 opencode.json 与现有 skills/openclaw/"
+elif [ "$AGENT_RUNTIME" = "codex" ]; then
+    ok "Codex 使用本机 ~/.codex 配置与现有 skills/openclaw/（登录：codex login）"
 else
 info "初始化 Easel profile (--profile $PROFILE)..."
 if [ -f "$HOME/.openclaw-${PROFILE}/openclaw.json" ]; then
@@ -676,6 +687,9 @@ if ! $OC config validate; then
     exit 1
 fi
 ok "OpenClaw 配置校验通过"
+elif [ "$AGENT_RUNTIME" = "codex" ]; then
+    info "Codex 无需常驻服务（每轮直接运行 codex exec）"
+    codex login status >/dev/null 2>&1 || warn "Codex 尚未登录；请运行 codex login"
 else
     info "OpenCode 将从项目 opencode.json 直接发现 skills/openclaw/"
     opencode models >/dev/null 2>&1 || warn "OpenCode 尚未配置模型；请运行 opencode 后使用 /connect"
@@ -683,8 +697,12 @@ fi
 
 # ---- 11. 启动 gateway ----
 step "8/8" "启动并验证" "配置校验 · Chromium · Gateway health"
-info "启动 Easel ${AGENT_RUNTIME} 服务..."
-EASEL_AGENT_RUNTIME="$AGENT_RUNTIME" python3 -m easel gateway start
+if [ "$AGENT_RUNTIME" = "codex" ]; then
+    info "Codex runtime 无常驻服务，跳过 gateway 启动"
+else
+    info "启动 Easel ${AGENT_RUNTIME} 服务..."
+    EASEL_AGENT_RUNTIME="$AGENT_RUNTIME" python3 -m easel gateway start
+fi
 
 # Playwright is a runtime dependency for browser login/publishing.
 if python3 -c 'import playwright' >/dev/null 2>&1; then

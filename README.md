@@ -197,12 +197,13 @@ README 的品牌图、海报、案例图片和视频统一保存在 `assets/read
 
 ## 🚀 快速开始
 
-Easel 支持 **OpenClaw** 与 **OpenCode** 两种 Agent runtime。安装向导会让你选择；已有安装或未设置 `EASEL_AGENT_RUNTIME` 时继续默认使用 OpenClaw。选择结果写入项目 `.env`，CLI、Web、gateway、ping 与 doctor 共用。
+Easel 支持 **OpenClaw**、**OpenCode** 与 **Codex** 三种 Agent runtime。安装向导会让你选择；已有安装或未设置 `EASEL_AGENT_RUNTIME` 时继续默认使用 OpenClaw。选择结果写入项目 `.env`，CLI、Web、gateway、ping 与 doctor 共用。
 
 - OpenClaw：使用隔离的 `easel` profile，保持原有完整兼容。
 - OpenCode：使用项目 `opencode.json` 直接发现 `skills/openclaw/`，并由 `easel gateway` 管理本地 headless server。供应商与默认模型在 Web 设置面板「对话与脚本」里管理：API Key 存 OpenCode 原生凭证（`opencode auth`），默认模型写入项目 `opencode.json`；也可运行 `opencode` 通过 `/connect` 配置。
+- Codex：复用本机 Codex CLI 的登录与配置（终端运行 `codex login` 配置，Easel 不代管凭据）。Web 设置面板「对话与脚本」显示 Codex 状态，并可选 Easel 侧默认模型（`EASEL_CODEX_MODEL`）与思考强度（`EASEL_CODEX_REASONING_EFFORT`），都写入项目 `.env` 且只作用于 Easel 发起的回合；不改动 `~/.codex/config.toml`。Codex 无常驻服务，`easel gateway` 不适用。
 
-环境要求：Linux、macOS 或 Windows 10/11、Python 3.10 及以上、Python `venv` 模块和 `git`。安装向导会按 runtime 检查 Node.js（OpenClaw 需要 24.16+ 或 26.1+，OpenCode 需要 20.10+）、FFmpeg 与 Playwright/Chromium。
+环境要求：Linux、macOS 或 Windows 10/11、Python 3.10 及以上、Python `venv` 模块和 `git`。安装向导会按 runtime 检查 Node.js（OpenClaw 需要 24.16+ 或 26.1+，OpenCode 需要 20.10+，Codex 的 npm 安装需要 16+）、FFmpeg 与 Playwright/Chromium。
 
 ```bash
 git clone https://github.com/ZJU-REAL/Easel.git
